@@ -117,7 +117,62 @@ User (WhatsApp / Linear / Email)
    └─ Notify user via WhatsApp
 ```
 
-## 5. Configuration
+## 5. Agent Identity & Configuration
+
+### 5.1 One Hermes Profile Per Agent
+
+Each specialist agent is a separate Hermes profile with isolated config, memory, and skills:
+
+```
+~/.hermes/profiles/alx-research/
+├── SOUL.md                    # Role definition & behavioral SOPs
+├── config.yaml                # Model, provider, toolsets
+├── .env                       # Agent-specific API keys
+├── skills/                    # Task-specific SOPs (knowledge base)
+│   ├── web-research/SKILL.md
+│   └── market-analysis/SKILL.md
+└── memories/                  # Persistent context (auto-managed)
+```
+
+### 5.2 Agent Registry
+
+Central YAML registry at `alx/agents/registry.yaml` — add/remove agents by editing this file, no code changes or restarts needed:
+
+```yaml
+agents:
+  research:
+    profile: alx-research
+    role: specialist
+    model: google/gemini-flash-2.0
+    capabilities: [web_search, arxiv, document_analysis]
+    email: alx-research@agentmail.to
+    active: true
+```
+
+The Team Lead reads this registry at task time to discover available specialists and match tasks to capabilities.
+
+### 5.3 GitHub Identity
+
+**Single `prajakt-agent` account** for all agents (per-agent accounts violate GitHub ToS and add complexity). Attribution via:
+- Git trailers: `Authored-by: alx-coder`
+- Branch conventions: `alx/<agent>/<issue>-<description>`
+- Team Lead owns the PR lifecycle (open, review coordination, merge)
+
+### 5.4 Email Identity
+
+**Per-agent AgentMail inboxes** sharing one org API key:
+- Phase 1 (free tier, 3 inboxes): `prajakt-hermes@`, `alx-teamlead@`, `alx-notifications@`
+- Phase 2 (paid): Per-agent inboxes (`alx-research@`, `alx-coder@`, etc.)
+
+### 5.5 Memory Strategy
+
+Memory is **isolated per profile** — critical for preventing cross-contamination. Shared context flows through:
+1. `delegate_task(context=...)` — explicit per-task context
+2. Structured outputs — specialists return JSON/markdown
+3. Git repos — code and docs as shared state
+4. Linear — task status and decisions
+
+### 5.6 Hermes Configuration
 
 ```yaml
 # ~/.hermes/config.yaml (proposed)
@@ -129,7 +184,35 @@ delegation:
   provider: "openrouter"
 ```
 
-## 6. Protocol Stack
+## 6. Deployment
+
+### Phase 1: Always-On Mac (Current)
+
+Hermes multiplexed gateway — single process serves all agent profiles:
+
+```
+┌──────────────────────────────────────────┐
+│  Mac (always-on)                          │
+│  ┌──────────────────────────────────┐    │
+│  │  Hermes Multiplexed Gateway      │    │
+│  │  ┌────────┐ ┌────────┐ ┌──────┐ │    │
+│  │  │TeamLead│ │Research│ │Coder │ │    │
+│  │  └────────┘ └────────┘ └──────┘ │    │
+│  │  WhatsApp ↔ Linear ↔ AgentMail  │    │
+│  └──────────────────────────────────┘    │
+│  Claude Code · gh CLI (prajakt-agent)    │
+└──────────────────────────────────────────┘
+```
+
+### Phase 2: Cloud VPS
+
+VPS with systemd for 24/7 reliability (~$20-40/month).
+
+### Phase 3: Profile-as-Git-Repo
+
+Each agent profile packaged as a git repo — portable, installable anywhere via `hermes profile install`.
+
+## 7. Protocol Stack
 
 ```
 Layer     Protocol   Purpose
@@ -175,9 +258,10 @@ Chat      WhatsApp   User ↔ Team Lead (real-time messaging)
 | Task deadlocks (agents waiting on each other) | Timeouts, max_iterations limits, live monitoring |
 | Security (agent with terminal access) | Approval modes, branch protection, PR-based workflow |
 
-## 9. References
+## 10. References
 
 - [Research Document](./docs/research.md) — Full framework comparison
+- [Design Answers](./docs/design-answers.md) — Agent identity, configuration & deployment details
 - [Hermes Delegation Docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/delegation)
 - [A2A Protocol](https://a2a-protocol.org/latest/specification/)
 - [MCP Protocol](https://modelcontextprotocol.io/specification)

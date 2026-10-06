@@ -1,0 +1,67 @@
+# ALX Agent Registry
+# Add/remove agents by editing this file. Team Lead reads it at task time.
+# No code changes or restarts needed.
+
+version: 1
+team: alx
+
+agents:
+  teamlead:
+    profile: alx-teamlead
+    role: orchestrator
+    model: anthropic/claude-sonnet-4
+    provider: anthropic
+    description: "Receives tasks, decomposes, delegates, synthesizes results"
+    capabilities: [planning, delegation, synthesis, communication]
+    email: alx-teamlead@agentmail.to
+    active: true
+
+  research:
+    profile: alx-research
+    role: specialist
+    model: google/gemini-flash-2.0
+    provider: openrouter
+    description: "Web research, academic papers, market analysis"
+    capabilities: [web_search, arxiv, document_analysis, competitive_intel]
+    email: alx-research@agentmail.to
+    active: true
+
+  coder:
+    profile: alx-coder
+    role: specialist
+    model: anthropic/claude-sonnet-4
+    provider: anthropic
+    description: "Feature implementation, bug fixes, refactoring via Claude Code"
+    capabilities: [coding, git, testing, debugging]
+    email: alx-coder@agentmail.to
+    active: true
+
+  reviewer:
+    profile: alx-reviewer
+    role: specialist
+    model: anthropic/claude-sonnet-4
+    provider: anthropic
+    description: "Code review, security scanning, test validation"
+    capabilities: [code_review, security_scan, test_validation]
+    email: alx-reviewer@agentmail.to
+    active: false  # Phase 2
+
+  writer:
+    profile: alx-writer
+    role: specialist
+    model: google/gemini-flash-2.0
+    provider: openrouter
+    description: "Documentation, emails, reports, content"
+    capabilities: [documentation, email_drafting, report_writing]
+    email: alx-writer@agentmail.to
+    active: false  # Phase 2
+
+  devops:
+    profile: alx-devops
+    role: specialist
+    model: google/gemini-flash-2.0
+    provider: openrouter
+    description: "CI/CD, infrastructure, deployment, monitoring"
+    capabilities: [ci_cd, docker, cloud_infra, monitoring]
+    email: alx-devops@agentmail.to
+    active: false  # Phase 2
