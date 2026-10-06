@@ -11,12 +11,20 @@ Instagram DM ──┐                     ┌── WhatsApp (notifications)
 WhatsApp ──────┤                     │
 Phone Call ────┘                     │
        ↓                             │
+┌─────────────────────────────────┐  │
+│          ZERNIO API             │  │  ← Unified social/messaging layer
+│  (MCP Server + Webhooks)        │  │
+│  Instagram DMs, WhatsApp,       │  │
+│  Posts, Stories, Analytics       │  │
+└──────────────┬──────────────────┘  │
+               ↓                     │
 ┌──────────────────────────────────────────────────────┐
 │                  STORE MANAGER                        │
 │               (Orchestrator Agent)                    │
 │                                                      │
-│  • Monitors all customer conversations               │
+│  • Receives messages via Zernio webhooks              │
 │  • Routes to specialist agents                       │
+│  • Responds via Zernio messaging API                 │
 │  • Escalates to store owner when needed              │
 └──────┬────────┬────────┬────────┬────────┬───────────┘
        │        │        │        │        │
@@ -25,9 +33,10 @@ Phone Call ────┘                     │
 │  Agent  │ │Media  │ │Agent   │ │Agent  │ │Agent     │
 └────┬────┘ └──┬────┘ └──┬─────┘ └──┬────┘ └──┬───────┘
      │         │         │          │          │
-  Shopify   Instagram  Shopify   Shopify    Shopify
-  Products  Posts/     Inventory  Orders    Reports
-  API       Stories   API        Webhooks   API
+  Shopify   Zernio    Shopify   Shopify    Shopify
+  Products  Posts/    Inventory  Orders    Reports
+  API       Stories   API       Webhooks   API
+            API
 ```
 
 ## 2. Agent Specifications
@@ -38,7 +47,7 @@ Phone Call ────┘                     │
 |----------|-------|
 | Role | Orchestrator — monitors all channels, delegates to specialists |
 | Model | Claude Sonnet (planning quality) |
-| Channels | Instagram DM webhooks, WhatsApp, Telephony |
+| Channels | Zernio webhooks (`message.received`), WhatsApp, Telephony |
 | Key Logic | Classify intent → route to correct agent → synthesise response |
 
 **Intent Classification:**
@@ -216,42 +225,121 @@ Customer asks "where is my order?" via DM
 
 **Delivery:** WhatsApp message to store owner with formatted report.
 
-## 3. Integration Architecture
+## 3. Integration Architecture — Zernio as Unified Layer
 
-### 3.1 Instagram DMs — Webhook Service
+### 3.1 Why Zernio
 
-Instagram DMs require a **public HTTPS endpoint** for webhooks. No existing MCP server handles this end-to-end.
+Zernio replaces the entire custom Instagram/WhatsApp integration layer:
 
+| Before (Custom) | After (Zernio) |
+|-----------------|---------------|
+| Build webhook service for Instagram DMs | ✅ Zernio `message.received` webhook |
+| Meta App review (2-4 weeks) | ✅ Already approved |
+| Public HTTPS endpoint for webhooks | ✅ Zernio handles it |
+| Instagram token refresh (every 60 days) | ✅ Zernio manages OAuth |
+| Media hosting (S3/R2) for Instagram posts | ✅ Zernio presigned uploads |
+| Separate WhatsApp Business API setup | ✅ Unified via Zernio |
+| Custom DM read/reply code | ✅ Zernio messaging inbox API |
+
+### 3.2 Zernio MCP Server
+
+Zernio exposes an MCP server at `https://mcp.zernio.com/mcp` that plugs directly into Hermes:
+
+```yaml
+# Add to Hermes MCP config
+mcpServers:
+  zernio:
+    url: https://mcp.zernio.com/mcp
+    transport: streamable-http
+    env:
+      ZERNIO_API_KEY: "${ZERNIO_API_KEY}"
 ```
-Instagram Platform → Webhook POST → ALX Webhook Service → Store Manager Agent
-                                          ↓
-                                    Message Queue (Redis/SQLite)
-                                          ↓
-                                    Agent processes & responds
-                                          ↓
-                                    Instagram Send API ← response
+
+**Available MCP Scopes:**
+- `posts:read` / `posts:write` — Publishing (Social Media Agent)
+- `messaging:write` — DMs and WhatsApp (Store Manager, Sales Agent)
+- `analytics:read` — Engagement metrics (Analytics Agent)
+- `accounts:read` — Connected account info
+- `commerce:write` — Shopify integration (if used)
+
+### 3.3 Instagram DMs via Zernio
+
+**Inbound (customer → agent):**
+```
+Customer sends Instagram DM
+    → Zernio receives via Meta webhook
+    → Zernio fires `message.received` webhook to our endpoint
+    → Store Manager Agent processes message
+    → Delegates to Sales/Order Agent
+    → Response sent via Zernio messaging API
+    → Zernio delivers reply as Instagram DM
 ```
 
-**Required Meta App Permissions:**
-- `instagram_manage_messages` — read/send DMs
-- `pages_messaging` — messaging via Page
-- `pages_manage_metadata` — webhook subscriptions
-- `instagram_content_publish` — posting (Marketing Agent)
-- `instagram_basic` — profile info
-- `pages_read_engagement` — Page insights
+**Zernio Webhook Events for eCommerce:**
+| Event | Use Case |
+|-------|----------|
+| `message.received` | New DM from customer (Instagram, WhatsApp) |
+| `message.delivered` | Confirm delivery (WhatsApp) |
+| `message.read` | Customer read our reply |
+| `message.failed` | Delivery failed — retry or alert |
+| `conversation.started` | New customer thread opened |
+| `comment.received` | Comment on Instagram post |
+| `reaction.received` | Emoji reaction on message |
 
-**Webhook Events to Subscribe:**
-- `messages` — new DM received
-- `messaging_postbacks` — quick reply button tapped
-- `message_reactions` — customer reacts to message
+**24h Reply Window:** Zernio handles this transparently — messages within 24h of customer's last message go through standard messaging API. Beyond 24h, WhatsApp requires approved templates.
 
-**24h Messaging Window:**
-- Customer initiates → 24h window opens
-- Agent can send unlimited messages within window
-- After 24h → can only send approved message templates (limited)
-- No cold outreach to customers who haven't messaged first
+**Message Types Supported:**
+- Text (1000 chars for Instagram)
+- Images (8MB)
+- Video/Audio/PDF (25MB)
+- Quick replies (up to 13 options) — great for product selection
+- Product templates — for sharing product cards
+- Typing indicators — show "agent is typing..."
 
-### 3.2 Shopify Integration
+### 3.4 Instagram Posting via Zernio (Social Media Agent)
+
+```bash
+# Upload media
+curl -X POST https://zernio.com/api/v1/media/presign \
+  -H "Authorization: Bearer $ZERNIO_API_KEY" \
+  -d '{"filename": "product.jpg", "contentType": "image/jpeg"}'
+# → returns uploadUrl + publicUrl
+
+# Publish to Instagram
+curl -X POST https://zernio.com/api/v1/posts \
+  -H "Authorization: Bearer $ZERNIO_API_KEY" \
+  -d '{
+    "content": "New arrivals! 🛍️ #fashion #newcollection",
+    "mediaItems": [{"type": "image", "url": "https://media.zernio.com/temp/..."}],
+    "platforms": [{"platform": "instagram", "accountId": "IG_ACCOUNT_ID"}],
+    "publishNow": true
+  }'
+```
+
+**Supported Instagram content:**
+- Feed posts (single image/video)
+- Reels (3-90s video)
+- Stories (image or video)
+- Carousels (2-10 items)
+- Scheduled posts (set `scheduledFor` instead of `publishNow`)
+
+### 3.5 WhatsApp via Zernio
+
+Same API for both customer communication and store owner notifications:
+
+```bash
+# Send message to store owner
+curl -X POST https://zernio.com/api/v1/messaging/send \
+  -H "Authorization: Bearer $ZERNIO_API_KEY" \
+  -d '{
+    "platform": "whatsapp",
+    "accountId": "WA_ACCOUNT_ID",
+    "to": "+91XXXXXXXXXX",
+    "text": "🛒 New Order #1042 - ₹1,499 - Blue Floral Dress (M)"
+  }'
+```
+
+### 3.6 Shopify Integration (unchanged)
 
 **Authentication:** Custom App with Admin API access token.
 
@@ -265,40 +353,26 @@ read_analytics                       # Analytics Agent
 read_customers                       # Order Agent (lookup)
 ```
 
-**MCP Server Option:** `hcu7/shopify-mcp` (59 tools, most complete) or official Anthropic-verified Shopify connector.
+**MCP Server Option:** Official Anthropic-verified Shopify MCP connector or `hcu7/shopify-mcp` (59 tools).
 
-### 3.3 WhatsApp Integration
+### 3.7 Telephony (unchanged)
 
-Already set up via Hermes gateway. Used for:
-- **Inbound:** Customer conversations (Store Manager routes)
-- **Outbound to owner:** Order notifications, analytics reports, escalations
-
-### 3.4 Telephony
-
-Via Exotel (India) or Twilio/Vapi for incoming calls:
-- Calls transcribed in real-time
-- Store Manager processes transcript
-- Delegates to Sales/Order Agent as needed
-- Response spoken back or followed up via WhatsApp
+Via Exotel (India) or Twilio/Vapi for incoming calls. Zernio also supports phone numbers for calls/SMS if preferred as a unified solution.
 
 ## 4. Technology Stack
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | Orchestration | Hermes Agent (delegate_task) | Agent coordination |
+| Social & Messaging | **Zernio API + MCP Server** | Instagram DMs, WhatsApp, posting, analytics |
 | Storefront | Shopify (GraphQL Admin API) | Products, orders, inventory |
-| Customer Chat | Instagram Graph API + WhatsApp | DM monitoring & response |
-| Social Media | Instagram Content Publishing API | Posts, stories, reels |
 | Telephony | Exotel / Twilio + Vapi | Incoming calls |
-| Webhook Service | FastAPI / Flask (public endpoint) | Instagram DM webhooks |
-| Media Hosting | Cloudflare R2 / S3 | Public URLs for Instagram posts |
 | Task Tracking | Linear (ALX team) | Development tracking |
-| Notifications | WhatsApp (store owner) | Order alerts, reports |
 | Data Parsing | Python (openpyxl/pandas) | Excel → Shopify import |
 
 ## 5. Deployment Architecture
 
-### Phase 1: Mac + Webhook Tunnel
+### Phase 1: Mac + Zernio (No Custom Infra)
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -312,11 +386,16 @@ Via Exotel (India) or Twilio/Vapi for incoming calls:
 │  ├─ order-agent profile                           │
 │  └─ analytics-agent profile                       │
 │                                                   │
-│  Webhook Service (FastAPI)                        │
-│  └─ Cloudflare Tunnel / ngrok → public HTTPS      │
+│  MCP Servers:                                     │
+│  ├─ Zernio (Instagram DMs, WhatsApp, posting)     │
+│  └─ Shopify (products, orders, inventory)         │
 │                                                   │
+│  Zernio webhook → Hermes webhook adapter          │
 │  Cron: analytics report (daily), token refresh    │
 └──────────────────────────────────────────────────┘
+```
+
+**No custom webhook service needed.** Zernio handles Meta/WhatsApp webhooks and forwards events to our Hermes webhook endpoint. No public URL, no tunnel, no FastAPI service.
 ```
 
 ### Phase 2: Cloud VPS
@@ -327,10 +406,9 @@ Via Exotel (India) or Twilio/Vapi for incoming calls:
 │                                         │
 │  Docker Compose:                        │
 │  ├─ hermes-gateway (all agent profiles) │
-│  ├─ webhook-service (Instagram DMs)     │
-│  ├─ redis (message queue)               │
 │  └─ caddy (reverse proxy, auto-TLS)     │
 │                                         │
+│  MCP: Zernio (hosted) + Shopify         │
 │  Public domain: shop.yourdomain.com     │
 └─────────────────────────────────────────┘
 ```
@@ -384,40 +462,37 @@ Via Exotel (India) or Twilio/Vapi for incoming calls:
 ## 7. Setup Requirements
 
 ### From Store Owner
-- [ ] Instagram Business/Creator account linked to Facebook Page
-- [ ] Facebook Developer App with required permissions
+- [ ] Instagram Business/Creator account
 - [ ] Shopify store with Custom App (Admin API token)
-- [ ] WhatsApp number for customer communication
-- [ ] WhatsApp number for owner notifications (can be same)
-- [ ] Media hosting (S3/R2) for Instagram post uploads
-- [ ] Public domain/URL for webhook endpoint
+- [ ] WhatsApp Business number
+- [ ] Zernio account (connect Instagram + WhatsApp in dashboard)
 
 ### Technical Setup
-- [ ] Meta App review & approval (instagram_manage_messages requires review)
+- [ ] Zernio API key + connect Instagram & WhatsApp accounts
+- [ ] Zernio MCP server added to Hermes
 - [ ] Shopify Custom App with 9 scopes
-- [ ] Instagram webhook subscription configuration
+- [ ] Shopify MCP server added to Hermes
+- [ ] Zernio webhook → Hermes webhook adapter configured
 - [ ] Shopify webhook registration (orders/create)
 - [ ] Hermes profiles for each agent
-- [ ] AgentMail inboxes (or shared inbox)
 - [ ] Cron job for analytics agent
-- [ ] Token refresh automation (Instagram: every 45 days)
 
 ## 8. Key Constraints & Risks
 
 | Constraint | Impact | Mitigation |
 |-----------|--------|-----------|
-| Instagram 24h reply window | Must respond within 24h of customer message | Typing indicator + quick acknowledgment immediately |
-| Instagram DM rate limit (~200/hr) | Can't spam responses | Queue + rate limiter |
-| Meta App Review required | 2-4 weeks for messaging permission approval | Start review process early |
+| Instagram 24h reply window | Must respond within 24h of customer message | Zernio handles; agent sends quick acknowledgment immediately |
+| Instagram DM rate limit (~200/hr) | Can't spam responses | Zernio manages rate limiting |
 | Shopify GraphQL rate limits | Cost-based throttling | Batch operations, respect Retry-After |
 | Image-to-product matching | No built-in visual search in Shopify | Use vision model to describe image → text search |
-| Instagram posts need public URLs | Can't upload directly from disk | Use S3/R2 as media CDN |
-| Long-lived tokens expire (60 days) | Service interruption if not refreshed | Cron job to refresh at day 45 |
+| Zernio dependency | Single vendor for social/messaging layer | REST API is standard; can migrate to direct Meta API if needed |
+| Zernio pricing | $6/account for 1-10 accounts | First 2 free; minimal cost vs building custom infra |
 
 ## 9. References
 
-- [Instagram Graph API Research](./docs/instagram-api.md)
+- [Instagram Graph API Research](./docs/instagram-api.md) — Direct API reference (backup for Zernio)
 - [Shopify API Research](./docs/shopify-api.md)
-- [Instagram Messenger API Docs](https://developers.facebook.com/docs/messenger-platform/instagram)
+- [Zernio API Docs](https://docs.zernio.com)
+- [Zernio LLM Docs](https://zernio.com/llms.txt)
+- [Zernio MCP Server](https://mcp.zernio.com/mcp)
 - [Shopify Admin API Docs](https://shopify.dev/docs/api/admin)
-- [Shopify Draft Orders](https://shopify.dev/docs/api/admin-rest/2024-10/resources/draftorder)
